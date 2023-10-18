@@ -1,92 +1,134 @@
 // Load the CSV file
-var bihar_points = ee.FeatureCollection('projects/ee-najah/assets/cimmyt_bihar1');
-Map.centerObject(bihar_points);
-Map.addLayer(bihar_points, {}, "{Points");
-
-print(bihar_points.limit(100));
-
-//get bihar shapefile
+// Replace the point data (biaf,cimmyt, pnp, wrms) with your data
+//  Replace roi with your data 
+//var roi = `your_location`
 
 
-var bihar = ee.FeatureCollection('FAO/GAUL/2015/level1')
-            .filter(ee.Filter.eq('ADM1_NAME', 'Bihar'));
+// get sentinel data
 
-Map.addLayer(bihar, {}, "Bihar shapefile");
-
-// get sentinel
-
-//date range
-
-var startDate = '2019-11-01';
-var endDate = '2019-11-30';
-
-//cloud masking
-
-
-/**
-* Function to mask clouds using the Sentinel-2 QA band
-* @param {ee.Image} image Sentinel-2 image
-* @return {ee.Image} cloud masked Sentinel-2 image
-*/
-function maskS2clouds(image) {
-  var qa = image.select('QA60');
-
-  // Bits 10 and 11 are clouds and cirrus, respectively.
-  var cloudBitMask = 1 << 10;
-  var cirrusBitMask = 1 << 11;
-
-  // Both flags should be set to zero, indicating clear conditions.
-  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
-      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
-
-  return image.updateMask(mask).divide(10000);
-}
-
-//filter sentinel
-
-
-var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
-          .filterDate(startDate, endDate)
-          .filterBounds(bihar)
-          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',10))
-          .map(maskS2clouds);
-var s2_bihar = s2.median().clip(bihar);
-          
-          
-//print(s2.size());
-// Select the bands of interest
-var bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'B12'];
-
-// // Clip the images to the Bihar state boundary
-// var sentinel_bihar = s2.select(bands)
-//                             .map(function(image) {
-//                               return image.clip(bihar);
-//                             });
-                            
-                            
-//viz
-
-// Define the visualization parameters
-var visParams = {
+var s2_harmonized = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterDate('2020-05-01', '2020-05-31') // *****Check date*****
+                  .filterBounds(roi)
+                  // Pre-filter to get less cloudy granules.
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20));
+var visualization = {
+  min: 0.0,
+  max: 3000,
   bands: ['B4', 'B3', 'B2'],
-  min: 0,
-  max: 0.3,
-  gamma: 1.4
 };
+var sat_img = s2_harmonized
+              .mosaic()
+              .clip(roi)
+              .select(['B2','B3','B4','B5','B6','B7','B8','B11','B12']);
+Map.addLayer(sat_img, visualization, 'RGB');
 
-// Add the imagery to the map
-Map.addLayer(s2_bihar, visParams, 'Sentinel-2 Bihar');
-// elevation and slope
+var imgVV = ee.ImageCollection('COPERNICUS/S1_GRD')
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+        .filter(ee.Filter.eq('instrumentMode', 'IW'))
+        .filterDate('2020-05-01', '2020-05-31') // *****Check date*****
+        .select('VV')
+        .map(function(image) {
+          var edge = image.lt(-30.0);
+          var maskedImage = image.mask().and(edge.not());
+          return image.updateMask(maskedImage);
+        });
 
+var imgVH = ee.ImageCollection('COPERNICUS/S1_GRD')
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+        .filter(ee.Filter.eq('instrumentMode', 'IW'))
+        .filterDate('2020-05-01', '2020-05-31') // *****Check date*****
+        .select('VH')
+        .map(function(image) {
+          var edge = image.lt(-30.0);
+          var maskedImage = image.mask().and(edge.not());
+          return image.updateMask(maskedImage);
+        });
+
+var descVV = imgVV.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING')).mosaic().clip(roi);
+var descVH = imgVH.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING')).mosaic().clip(roi);
+Map.addLayer(descVV,{min:-15,max:3},'descVV');
+Map.addLayer(descVH,{min:-15,max:5},'descVH');
+
+var era5 = ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_BY_HOUR')
+                .filter(ee.Filter.date('2020-05-01', '2020-05-31')); // *****Check date*****
+
+var tempimg = era5.median().clip(roi).select(['skin_temperature','total_precipitation',]);
+
+//create indices
+
+// Compute the NDVI index and add it as a band to the image.
+var ndvi = sat_img.expression('(nir - red) / (nir + red)', {
+  'nir': sat_img.select('B8'), // NIR (near-infrared) band
+  'red': sat_img.select('B4')  // Red band
+}).rename('ndvi');
+
+// Compute the NDWI index and add it as a band to the image.
+var ndwi = sat_img.expression('(nir - green) / (nir + green)', {
+  'nir': sat_img.select('B8'), // NIR band
+  'green': sat_img.select('B3') // Green band
+}).rename('ndwi');
+
+// Compute the NDMI index and add it as a band to the image.
+var ndmi = sat_img.expression('(nir - swir1) / (nir + swir1)', {
+  'nir': sat_img.select('B8'),   // NIR band
+  'swir1': sat_img.select('B11') // SWIR1 band
+}).rename('ndmi');
+
+// Compute the NBR index and add it as a band to the image.
+var nbr = sat_img.expression('(nir - swir2) / (nir + swir2)', {
+  'nir': sat_img.select('B8'),   // NIR band
+  'swir2': sat_img.select('B12') // SWIR2 band
+}).rename('nbr');
+
+// Compute the BAI index and add it as a band to the image.
+var bai = sat_img.expression('1.0 / ((0.1 - red) ** 2 + (0.06 - nir) ** 2)', {
+  'red': sat_img.select('B4'),  // Red band
+  'nir': sat_img.select('B8')   // NIR band
+}).rename('bai');
+
+// Compute the BSI index and add it as a band to the image.
+var bsi = sat_img.expression('(swir2 + red) / (nir + swir2)', {
+  'swir2': sat_img.select('B12'), // SWIR2 band
+  'red': sat_img.select('B4'),    // Red band
+  'nir': sat_img.select('B8')     // NIR band
+}).rename('bsi');
+
+
+// Compute the EVI index and add it as a band to the image.
+var evi = sat_img.expression('2.5 * ((nir - red) / (nir + 6 * red - 7.5 * blue + 1))', {
+  'nir': sat_img.select('B8'), // NIR band
+  'red': sat_img.select('B4'), // Red band
+  'blue': sat_img.select('B2') // Blue band
+}).rename('evi');
+
+// Compute the SAVI index and add it as a band to the image.
+var savi = sat_img.expression('1.5 * ((nir - red) / (nir + red + 0.5))', {
+  'nir': sat_img.select('B8'), // NIR band
+  'red': sat_img.select('B4')  // Red band
+}).rename('savi');
+
+// Compute the LAI index and add it as a band to the image.
+var lai = sat_img.expression('3.618 * (nir - red) / (nir + red + 0.684)', {
+  'nir': sat_img.select('B8'), // NIR band
+  'red': sat_img.select('B4')  // Red band
+}).rename('lai');
+
+// Compute the Albedo and add it as a band to the image.
+var albedo = sat_img.expression('(1.0 - ((nir + red) - (swir1 + swir2)) / (nir + red + swir1 + swir2))', {
+  'nir': sat_img.select('B8'),   // NIR band
+  'red': sat_img.select('B4'),   // Red band
+  'swir1': sat_img.select('B11'), // SWIR1 band
+  'swir2': sat_img.select('B12')  // SWIR2 band
+}).rename('albedo');
 
 // Load the SRTM dataset
 var srtm = ee.Image('USGS/SRTMGL1_003');
 
 // Clip the SRTM dataset to the Bihar shapefile
-var srtm_bihar = srtm.clip(bihar);
+var srtm_roi = srtm.clip(roi);
 
 // Compute the elevation and slope from the SRTM dataset
-var elevation = srtm_bihar.select('elevation');
+var elevation = srtm_roi.select('elevation');
 var slope = ee.Terrain.slope(elevation);
 
 // Downsample the elevation and slope bands to 10 meters
@@ -99,130 +141,37 @@ var slope_10m = slope.resample('bilinear').reproject({
   scale: 10
 });
 
-s2_bihar = s2_bihar.addBands([elevation_10m, slope_10m]);
-
-// add lst
-
-
-// add lst
-
-// Load the land surface temperature dataset
-var dataset = ee.ImageCollection('MODIS/061/MOD11A1').filter(ee.Filter.date(startDate, endDate));
-var landSurfaceTemperature = dataset.select('LST_Day_1km').mean().clip(bihar);
-
-// Downsample the land surface temperature band to 10 meters
-var lst_10m = landSurfaceTemperature.resample('bilinear').reproject({
-  'crs': landSurfaceTemperature.projection(),
-  'scale': 10
-});
-
-// Add the land surface temperature band to the image
-var s2_bihar = s2_bihar.addBands(lst_10m);
-
-
-// add to the lsit
-
-
-bands = bands.concat(['elevation', 'slope', 'LST_Day_1km']);
-
-
-//create indices
-
-// Compute the NDVI index and add it as a band to the image.
-var ndvi = s2_bihar.expression('(nir - red) / (nir + red)', {
-  'nir': s2_bihar.select('B8'), // NIR (near-infrared) band
-  'red': s2_bihar.select('B4')  // Red band
-}).rename('ndvi');
-
-// Compute the NDWI index and add it as a band to the image.
-var ndwi = s2_bihar.expression('(nir - green) / (nir + green)', {
-  'nir': s2_bihar.select('B8'), // NIR band
-  'green': s2_bihar.select('B3') // Green band
-}).rename('ndwi');
-
-// Compute the NDMI index and add it as a band to the image.
-var ndmi = s2_bihar.expression('(nir - swir1) / (nir + swir1)', {
-  'nir': s2_bihar.select('B8'),   // NIR band
-  'swir1': s2_bihar.select('B11') // SWIR1 band
-}).rename('ndmi');
-
-// Compute the NBR index and add it as a band to the image.
-var nbr = s2_bihar.expression('(nir - swir2) / (nir + swir2)', {
-  'nir': s2_bihar.select('B8'),   // NIR band
-  'swir2': s2_bihar.select('B12') // SWIR2 band
-}).rename('nbr');
-
-// Compute the BAI index and add it as a band to the image.
-var bai = s2_bihar.expression('1.0 / ((0.1 - red) ** 2 + (0.06 - nir) ** 2)', {
-  'red': s2_bihar.select('B4'),  // Red band
-  'nir': s2_bihar.select('B8')   // NIR band
-}).rename('bai');
-
-// Compute the BSI index and add it as a band to the image.
-var bsi = s2_bihar.expression('(swir2 + red) / (nir + swir2)', {
-  'swir2': s2_bihar.select('B12'), // SWIR2 band
-  'red': s2_bihar.select('B4'),    // Red band
-  'nir': s2_bihar.select('B8')     // NIR band
-}).rename('bsi');
-
-
-// Compute the EVI index and add it as a band to the image.
-var evi = s2_bihar.expression('2.5 * ((nir - red) / (nir + 6 * red - 7.5 * blue + 1))', {
-  'nir': s2_bihar.select('B8'), // NIR band
-  'red': s2_bihar.select('B4'), // Red band
-  'blue': s2_bihar.select('B2') // Blue band
-}).rename('evi');
-
-// Compute the SAVI index and add it as a band to the image.
-var savi = s2_bihar.expression('1.5 * ((nir - red) / (nir + red + 0.5))', {
-  'nir': s2_bihar.select('B8'), // NIR band
-  'red': s2_bihar.select('B4')  // Red band
-}).rename('savi');
-
-// Compute the LAI index and add it as a band to the image.
-var lai = s2_bihar.expression('3.618 * (nir - red) / (nir + red + 0.684)', {
-  'nir': s2_bihar.select('B8'), // NIR band
-  'red': s2_bihar.select('B4')  // Red band
-}).rename('lai');
-
-// Compute the Albedo and add it as a band to the image.
-var albedo = s2_bihar.expression('(1.0 - ((nir + red) - (swir1 + swir2)) / (nir + red + swir1 + swir2))', {
-  'nir': s2_bihar.select('B8'),   // NIR band
-  'red': s2_bihar.select('B4'),   // Red band
-  'swir1': s2_bihar.select('B11'), // SWIR1 band
-  'swir2': s2_bihar.select('B12')  // SWIR2 band
-}).rename('albedo');
+sat_img = sat_img.addBands([elevation_10m, slope_10m]);
 
 // Update the 'bands' list to include these additional indices
-bands = bands.concat(['ndvi', 'ndwi', 'ndmi', 'nbr', 'bai', 'bsi', 'savi', 'evi', 'lai']);
-
-// Add the computed indices to the image
-s2_bihar = s2_bihar.addBands([ndvi, ndwi, ndmi, nbr, bai, bsi, savi, evi, albedo, lai]);
+var img = sat_img.addBands([tempimg,descVV,descVH,ndvi,ndwi,ndmi,nbr,bai,bsi,savi,evi,lai]);
+print(img);
+Map.addLayer(img,{}, 'Concat');
+// bands = bands.concat(['ndvi', 'ndwi', 'ndmi', 'nbr', 'bai', 'bsi', 'savi', 'evi', 'lai']);
+// ---------------------------------------------------------------------------------------
+// -------------------------------- Vector layer -----------------------------------------
+// ---------------------------------------------------------------------------------------
 
 // trainig data creation
 
+var full_csv = pnp.merge(biaf).merge(wrms); // They are all done in May 2022
+print('Size of csv points:',full_csv.size());
+Map.addLayer(full_csv);
+Map.centerObject(full_csv,8);
 
-var training_data = s2_bihar.select(bands).sampleRegions({
-  'collection': bihar_points,
-  'properties': ['OC'],
+var training_data = img.sampleRegions({
+  'collection': full_csv,
+  'properties': ['Id','OC'],
   'scale': 10
 });
 
-print(training_data.size());
+print('Size of sampled points:',training_data.size());
 
 print(training_data.limit(100));
 
-// split the data to test and train
-
-var training_data = training_data.randomColumn();
-
-//export it 
-
-
 Export.table.toDrive({
   collection: training_data,
-  description: 'spolify_bihar_training',
+  description: 'biaf_wrms_pnp__sample',
   fileFormat: 'csv',
   folder: 'ee'
 });
-
